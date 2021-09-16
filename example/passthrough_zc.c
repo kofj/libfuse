@@ -10,7 +10,7 @@
 /** @file
  *
  * This file system mirrors the existing file system hierarchy of the
- * system, starting at the root file system. This is implemented by
+ * system with zero copy, starting at the root file system. This is implemented by
  * just "passing through" all requests to the corresponding user-space
  * libc functions. This implementation is a little more sophisticated
  * than the one in passthrough.c, so performance is not quite as bad.
@@ -69,6 +69,15 @@ static void *xmp_init(struct fuse_conn_info *conn,
 	cfg->entry_timeout = 0;
 	cfg->attr_timeout = 0;
 	cfg->negative_timeout = 0;
+
+    // Use splicing if supported. Since we are using writeback caching
+    // and readahead, individual requests should have a decent size so
+    // that splicing between fd's is well worth it.
+    if (conn->capable & FUSE_CAP_SPLICE_WRITE)
+        conn->want |= FUSE_CAP_SPLICE_WRITE;
+    if (conn->capable & FUSE_CAP_SPLICE_READ)
+        conn->want |= FUSE_CAP_SPLICE_READ;
+
 
     char* msg;
     asprintf(&msg, "Protocol version: %d.%d\n", conn->proto_major,

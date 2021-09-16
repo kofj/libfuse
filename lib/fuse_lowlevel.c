@@ -483,6 +483,8 @@ static int fuse_send_data_iov_fallback(struct fuse_session *se,
 	void *mbuf;
 	int res;
 
+    fuse_log(FUSE_LOG_DEBUG, "\033[0;34m ######## fuse_send_data_iov_fallback \033[0m\n");
+
 	/* Optimize common case */
 	if (buf->count == 1 && buf->idx == 0 && buf->off == 0 &&
 	    !(buf->buf[0].flags & FUSE_BUF_IS_FD)) {
@@ -643,6 +645,9 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 			       struct iovec *iov, int iov_count,
 			       struct fuse_bufvec *buf, unsigned int flags)
 {
+	fuse_log(FUSE_LOG_DEBUG, "\033[0;32m ######## fuse zero copy start \033[0m\n");
+
+	int fallback_reason;
 	int res;
 	size_t len = fuse_buf_size(buf);
 	struct fuse_out_header *out = iov[0].iov_base;
@@ -654,11 +659,17 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 	size_t headerlen;
 	struct fuse_bufvec pipe_buf = FUSE_BUFVEC_INIT(len);
 
-	if (se->broken_splice_nonblock)
+	if (se->broken_splice_nonblock) {
+	    fallback_reason = 1;
+	    fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[1]: se->broken_splice_nonblock \033[0m\n");
 		goto fallback;
+	}
 
-	if (flags & FUSE_BUF_NO_SPLICE)
+	if (flags & FUSE_BUF_NO_SPLICE) {
+        fallback_reason = 2;
+	    fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[2]: flags & FUSE_BUF_NO_SPLICE \033[0m\n");
 		goto fallback;
+	}
 
 	total_buf_size = 0;
 	for (idx = buf->idx; idx < buf->count; idx++) {
@@ -666,16 +677,26 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 		if (idx == buf->idx)
 			total_buf_size -= buf->off;
 	}
-	if (total_buf_size < 2 * pagesize)
+	if (total_buf_size < 2 * pagesize) {
+	    fallback_reason = 3;
+	    fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[3]: total_buf_size < 2 * pagesize \033[0m\n");
 		goto fallback;
+	}
 
 	if (se->conn.proto_minor < 14 ||
-	    !(se->conn.want & FUSE_CAP_SPLICE_WRITE))
+	    !(se->conn.want & FUSE_CAP_SPLICE_WRITE)) {
+	    fallback_reason = 4;
+	    fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[4]: (proto_minor <14)=%d, (FUSE_CAP_SPLICE_WRITE)=%d \033[0m\n",
+              se->conn.proto_minor < 14, !(se->conn.want & FUSE_CAP_SPLICE_WRITE));
 		goto fallback;
+	}
 
 	llp = fuse_ll_get_pipe(se);
-	if (llp == NULL)
+	if (llp == NULL) {
+	    fallback_reason = 5;
+	    fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[5]: fuse_ll_get_pipe failed \033[0m\n");
 		goto fallback;
+	}
 
 
 	headerlen = iov_length(iov, iov_count);
@@ -696,18 +717,26 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 				if (res > 0)
 					llp->size = res;
 				llp->can_grow = 0;
+				fallback_reason = 6;
+				fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[6]: fcntl failed \033[0m\n");
 				goto fallback;
 			}
 			llp->size = res;
 		}
-		if (llp->size < pipesize)
+		if (llp->size < pipesize) {
+		    fallback_reason = 7;
+		    fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[7]: llp->size < pipesize \033[0m\n");
 			goto fallback;
+		}
 	}
 
 
 	res = vmsplice(llp->pipe[1], iov, iov_count, SPLICE_F_NONBLOCK);
-	if (res == -1)
+	if (res == -1) {
+	    fallback_reason = 8;
+	    fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[8]: vmsplice failed \033[0m\n");
 		goto fallback;
+	}
 
 	if (res != headerlen) {
 		res = -EIO;
@@ -738,6 +767,8 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 
 			pthread_setspecific(se->pipe_key, NULL);
 			fuse_ll_pipe_free(llp);
+			fallback_reason = 9;
+			fuse_log(FUSE_LOG_DEBUG, "\033[0;35m ######## zerocopy fallback[9]: fuse_ll_pipe_free failed \033[0m\n");
 			goto fallback;
 		}
 		res = -res;
@@ -834,6 +865,7 @@ clear_pipe:
 	return res;
 
 fallback:
+    fuse_log(FUSE_LOG_DEBUG, "\033[0;36m ######## zerocopy fallback[%d] \033[0m\n", fallback_reason);
 	return fuse_send_data_iov_fallback(se, ch, iov, iov_count, buf, len);
 }
 #else
@@ -841,6 +873,7 @@ static int fuse_send_data_iov(struct fuse_session *se, struct fuse_chan *ch,
 			       struct iovec *iov, int iov_count,
 			       struct fuse_bufvec *buf, unsigned int flags)
 {
+    fuse_log(FUSE_LOG_DEBUG,"\033[0;31m ######## fuse fallback to memory copy \033[0m\n");
 	size_t len = fuse_buf_size(buf);
 	(void) flags;
 
@@ -861,6 +894,7 @@ int fuse_reply_data(fuse_req_t req, struct fuse_bufvec *bufv,
 	out.unique = req->unique;
 	out.error = 0;
 
+    fuse_log(FUSE_LOG_DEBUG, "\033[0;33m fuse_reply_data \033[0m\n");
 	res = fuse_send_data_iov(req->se, req->ch, iov, 1, bufv, flags);
 	if (res <= 0) {
 		fuse_free_req(req);
