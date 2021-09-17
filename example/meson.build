@@ -37,4 +37,11 @@ if not platform.endswith('bsd') and platform != 'dragonfly' and add_languages('c
                install: false)
 endif
 
+if not platform.endswith('bsd') and platform != 'dragonfly' and add_languages('cpp', required : false)
+    executable('passthrough_zc', 'passthrough_zc.c',
+               dependencies: [ thread_dep, libfuse_dep ],
+               install: false)
+
+endif
+
 # TODO: Link passthrough_fh with ulockmgr if available
